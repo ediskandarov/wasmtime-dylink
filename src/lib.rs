@@ -7,3 +7,6 @@ mod metadata;
 pub use loader::{Arena, Library, Loader, Symbol};
 pub use metadata::{Layout, Metadata};
 pub use wasmtime;
+
+#[cfg(feature = "emscripten")]
+pub mod emscripten;

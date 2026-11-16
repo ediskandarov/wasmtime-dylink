@@ -1,6 +1,6 @@
 [package]
 name = "wasmtime-dylink"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.94"
 description = "A dylink.0 shared-library loader built on the public Wasmtime API"
@@ -9,6 +9,10 @@ repository = "https://github.com/ediskandarov/wasmtime-dylink"
 keywords = ["wasmtime", "wasm", "dylink", "linker"]
 categories = ["wasm"]
 include = ["src/**", "tests/**", "examples/**", "README.md", "LICENSE", "Cargo.toml", "Cargo.lock"]
+
+[features]
+default = []
+emscripten = []
 
 [dependencies]
 wasmtime = { version = "47", default-features = false, features = ["std", "runtime", "cranelift", "reexport-wasmparser"] }

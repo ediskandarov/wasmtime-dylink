@@ -432,3 +432,19 @@ fn direct_function_types_are_checked() {
         .unwrap();
     assert!(loader.load(&mut store, &host, "bad").is_err());
 }
+
+#[test]
+fn local_dependencies_can_be_reused_without_leaking_into_global_scope() {
+    let (mut store, host, mut loader, _, _) = setup();
+    loader.register("dep", &binary(r#"(module (@dylink.0 (mem-info)) (func (export "answer") (result i32) i32.const 42))"#)).unwrap();
+    loader.register("root", &binary(r#"(module (@dylink.0 (mem-info) (needed "dep")) (import "env" "answer" (func $answer (result i32))) (func (export "run") (result i32) call $answer))"#)).unwrap();
+    loader.load_local(&mut store, &host, "dep").unwrap();
+    assert!(loader.symbol("answer").is_none());
+    let root = loader.load_local(&mut store, &host, "root").unwrap();
+    assert_eq!(call(&mut store, &root, "run"), 42);
+    assert!(loader.symbol("answer").is_none());
+    assert!(loader.symbol("run").is_none());
+    loader.promote("root").unwrap();
+    assert!(loader.symbol("answer").is_some());
+    assert!(loader.symbol("run").is_some());
+}

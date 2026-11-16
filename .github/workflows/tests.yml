@@ -1,6 +1,7 @@
 name: Tests
 on:
   push:
+    branches: [main]
   pull_request:
 permissions:
   contents: read
@@ -15,7 +16,15 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: sudo apt-get update && sudo apt-get install -y clang lld
       - run: cargo fmt --check
-      - run: cargo clippy --locked --all-targets -- -D warnings
+      - run: cargo clippy --locked --all-features --all-targets -- -D warnings
       - run: cargo test --locked
+      - run: cargo test --locked --all-features
       - run: cargo test --locked --test clang -- --ignored
       - run: cargo run --locked --example runtime_load
+      - name: Emscripten C integration
+        run: |
+          git clone --depth 1 https://github.com/emscripten-core/emsdk.git "$RUNNER_TEMP/emsdk"
+          "$RUNNER_TEMP/emsdk/emsdk" install 6.0.12
+          "$RUNNER_TEMP/emsdk/emsdk" activate 6.0.12
+          source "$RUNNER_TEMP/emsdk/emsdk_env.sh"
+          cargo test --locked --features emscripten --test emscripten_c -- --ignored

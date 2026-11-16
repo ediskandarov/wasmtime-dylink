@@ -215,7 +215,7 @@ impl Loader {
             return Ok(library.clone());
         }
         let mut order = Vec::new();
-        self.visit(name, &mut HashSet::new(), &mut order)?;
+        self.visit(name, &mut HashSet::new(), &mut order, false)?;
         let mut store = store.as_context_mut();
         let result = self.load_group(&mut store, host, &order);
         if result.is_err() {
@@ -225,11 +225,111 @@ impl Loader {
         Ok(self.loaded[name].clone())
     }
 
+    /// Load with a local symbol scope. Dependencies can see each other, but
+    /// symbols introduced by this group are not added to the global scope.
+    /// Previously loaded dependencies remain available to this load group.
+    pub fn load_local<T: 'static>(
+        &mut self,
+        mut store: impl AsContextMut<Data = T>,
+        host: &Linker<T>,
+        name: &str,
+    ) -> Result<Library> {
+        ensure!(!self.poisoned, "loader is poisoned; discard its store");
+        let saved = self.symbols.clone();
+        self.expose_dependencies(name)?;
+        let result = self.load(&mut store, host, name);
+        self.symbols = saved;
+        result
+    }
+
+    /// Publish the exports of an already loaded library and its dependencies.
+    /// Existing global bindings keep their addresses.
+    pub fn promote(&mut self, name: &str) -> Result<()> {
+        ensure!(!self.poisoned, "loader is poisoned");
+        ensure!(
+            self.loaded.contains_key(name),
+            "library is not loaded: {name}"
+        );
+        self.expose_dependencies(name)?;
+        Ok(())
+    }
+
+    /// Whether this library has already been instantiated successfully.
+    pub fn is_loaded(&self, name: &str) -> bool {
+        !self.poisoned && self.loaded.contains_key(name)
+    }
+
+    /// Look up a library's own exports, then its dependencies in breadth-first order.
+    pub fn symbol_in(&self, library: &str, name: &str) -> Option<Symbol> {
+        self.dependency_names(library)
+            .iter()
+            .find_map(|library| self.loaded.get(library)?.symbol(name))
+    }
+
+    #[cfg(feature = "emscripten")]
+    pub(crate) fn memory(&self) -> Memory {
+        self.memory
+    }
+
+    fn dependency_names(&self, name: &str) -> Vec<String> {
+        let mut queue = std::collections::VecDeque::from([name.to_owned()]);
+        let mut seen = HashSet::new();
+        let mut names = Vec::new();
+        while let Some(name) = queue.pop_front() {
+            if !seen.insert(name.clone()) {
+                continue;
+            }
+            if let Some(definition) = self.definitions.get(&name) {
+                queue.extend(definition.metadata.needed.iter().cloned());
+            }
+            names.push(name);
+        }
+        names
+    }
+
+    fn expose_dependencies(&mut self, name: &str) -> Result<()> {
+        let mut order = Vec::new();
+        self.visit(name, &mut HashSet::new(), &mut order, true)?;
+        let existing: HashSet<_> = self.symbols.keys().cloned().collect();
+        for name in order {
+            let Some(library) = self.loaded.get(&name) else {
+                continue;
+            };
+            for (symbol, value) in &library.symbols {
+                let flags = self.definitions[&name].metadata.export_flags(symbol);
+                if symbol.starts_with("__wasm_")
+                    || symbol == "__dso_handle"
+                    || symbol == "__tls_base"
+                    || flags.contains(SymbolFlags::VISIBILITY_HIDDEN)
+                    || existing.contains(symbol)
+                {
+                    continue;
+                }
+                let weak = flags.contains(SymbolFlags::BINDING_WEAK);
+                if self
+                    .symbols
+                    .get(symbol)
+                    .is_none_or(|binding| binding.weak && !weak)
+                {
+                    self.symbols.insert(
+                        symbol.clone(),
+                        Binding {
+                            symbol: *value,
+                            weak,
+                        },
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn visit(
         &self,
         name: &str,
         visited: &mut HashSet<String>,
         order: &mut Vec<String>,
+        include_loaded: bool,
     ) -> Result<()> {
         let mut stack = vec![(name, false)];
         while let Some((name, finish)) = stack.pop() {
@@ -237,7 +337,9 @@ impl Loader {
                 order.push(name.to_owned());
                 continue;
             }
-            if self.loaded.contains_key(name) || !visited.insert(name.to_owned()) {
+            if (!include_loaded && self.loaded.contains_key(name))
+                || !visited.insert(name.to_owned())
+            {
                 continue;
             }
             let definition = self

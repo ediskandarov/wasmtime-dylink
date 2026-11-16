@@ -9,7 +9,7 @@ It is a linker, **not a complete Emscripten or WASIX execution environment**.
 
 ```toml
 [dependencies]
-wasmtime-dylink = "0.1"
+wasmtime-dylink = "0.2"
 ```
 
 ```rust,no_run
@@ -50,8 +50,9 @@ cargo run --example runtime_load
 The [example](examples/runtime_load.rs) implements an application import which
 loads a plugin while another Wasm instance is running, then returns a function
 pointer. Applications can build their `dlopen`/`dlsym` interface on the same API.
-Emscripten's `_dlopen_js` protocol, filesystem lookup, Asyncify, libc, and WASI
-system imports remain responsibilities of the embedding runtime.
+For Emscripten's C `dlopen`/`dlsym` API, enable the optional adapter below.
+Filesystem lookup, libc, WASI system imports and asynchronous suspension remain
+responsibilities of the embedding runtime.
 
 ## Memory and symbol ownership
 
@@ -67,6 +68,9 @@ does not coordinate with guest `malloc`. Memory/table grow only when needed,
 within the arena and Wasmtime limits. Each new module's memory is zeroed before
 instantiation, including BSS. Function pointers use the shared table; existing
 entries are reused to preserve identity.
+
+`load_local` isolates a library group from the global symbol scope; `promote`
+exposes an already loaded group without running constructors again.
 
 Register dependencies by the exact names in `Metadata::needed`. Registration
 parses and compiles; loading instantiates the dependency closure. No filesystem
@@ -97,7 +101,7 @@ stubs; constructors in a cycle must not assume each other has already run.
   `__wasm_init_memory`. It executes during instantiation and must only initialize
   that module's memory. User constructors belong in `__wasm_call_ctors`.
 - Not supported: memory64, thread-shared memory/TLS, async instantiation,
-  ELF/POSIX symbol-version or `RTLD_*` semantics, nested loads from constructors,
+  ELF/POSIX symbol-version semantics, nested loads from constructors,
   and re-exporting a function whose binding is still unresolved. Unsupported
   metadata/imports fail explicitly. Modules must import their memory/table.
 - Modules share memory and authority. They are **not isolated from one another**.
@@ -106,6 +110,49 @@ stubs; constructors in a cycle must not assume each other has already run.
 
 The dependency is Wasmtime 47, requiring Rust 1.94 or newer. This repository's
 checks use Rust 1.95. No game code, game binaries, or game resources are included.
+
+## Emscripten adapter
+
+Enable `features = ["emscripten"]` on the dependency. The feature is off by
+default and adds no dependencies. It supplies `env._dlopen_js` and
+`env._dlsym_js` for an initialized, non-PIE wasm32 Emscripten main module.
+
+1. Keep an `Option<Emscripten<AppState>>` in your Wasmtime store data.
+2. Call `emscripten::add_to_linker(&mut host, |s| &mut s.dylink)` before
+   instantiating the main module. Provide its other system imports yourself.
+3. Initialize the main C runtime. Reserve a memory arena using its `malloc`
+   and table indices after its existing table entries. Keep that allocation alive.
+4. Construct `Emscripten::new(store, main, host, arena, resolver)` and place it
+   in the state's option. The resolver receives a store context and an exact
+   library name, returning Wasm bytes. It can use application assets, an MR
+   reader, or a filesystem chosen by the application.
+
+The main must export `memory`, `__indirect_function_table`, `malloc`, `free`,
+and `__dl_seterr`. Export the C functions/data that side modules need, too.
+Main exports are made available to side modules automatically; duplicate host
+imports are rejected. See [the complete C integration test](tests/emscripten_c.rs)
+for setup and the required compiler flags.
+
+The adapter reads the guest `dso`, fills its allocated memory/table fields,
+uses embedded `file_data` when supplied, and resolves missing dependency bytes
+through the callback. It supports local/global scopes, eager `RTLD_LAZY/NOW`,
+`RTLD_NOLOAD`, `RTLD_NODELETE`, `RTLD_DEFAULT`, and `dlopen(NULL)`.
+Names are passed unchanged; path aliases/search rules belong to the resolver.
+C `dlerror()` receives lookup/resolver errors and keeps its normal read-once
+behavior. `dlclose` uses Emscripten's existing retained-instance behavior.
+A constructor/linking failure poisons the loader and traps: discard that store.
+
+This is the internal Emscripten wasm32 `dso` ABI with the inline name at byte
+36, checked against SDK 6.0.13-git locally; CI is configured for SDK 6.0.12.
+Run the C test when changing SDK versions. Main modules built with Asyncify
+are tested with synchronous loading; side modules do not need Asyncify.
+Asynchronous loading, thread catch-up, `RTLD_NEXT`, and reentrant constructor
+loads are unsupported.
+
+```sh
+cargo test --all-features
+EMCC=emcc cargo test --features emscripten --test emscripten_c -- --ignored
+```
 
 ## Verification
 
