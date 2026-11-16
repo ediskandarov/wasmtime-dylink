@@ -448,3 +448,95 @@ fn local_dependencies_can_be_reused_without_leaking_into_global_scope() {
     assert!(loader.symbol("answer").is_some());
     assert!(loader.symbol("run").is_some());
 }
+
+#[test]
+fn optimized_base_globals_initialize_before_constructors() {
+    let (mut store, host, mut loader, _, _) = setup();
+    let bytes = binary(
+        r#"(module
+      (@dylink.0 (mem-info (memory 32 4)))
+      (import "env" "__memory_base" (global $base i32))
+      (global $address (mut i32) (i32.const 12))
+      (func $init global.get $base i32.const 12 i32.add global.set $address)
+      (start $init)
+      (func (export "read") (result i32) global.get $address))"#,
+    );
+    loader.register("optimized", &bytes).unwrap();
+    let library = loader.load(&mut store, &host, "optimized").unwrap();
+    assert_eq!(
+        call(&mut store, &library, "read"),
+        library.memory_base as i32 + 12
+    );
+}
+
+#[test]
+fn base_initializer_cannot_touch_imported_state_or_call_code() {
+    for (source, instructions) in [
+        (
+            "env",
+            "global.get $base i32.const 12 i32.add global.set $external",
+        ),
+        (
+            "GOT.mem",
+            "global.get $base i32.const 12 i32.add global.set $local",
+        ),
+        ("env", "call $callback"),
+    ] {
+        let bytes = binary(&format!(
+            r#"(module
+          (@dylink.0 (mem-info (memory 32 4)))
+          (import "{source}" "__memory_base" (global $base i32))
+          (import "env" "external" (global $external (mut i32)))
+          (import "env" "callback" (func $callback))
+          (global $local (mut i32) (i32.const 0))
+          (func $init {instructions}) (start $init))"#
+        ));
+        assert!(Metadata::parse(&bytes).is_err());
+    }
+}
+
+#[test]
+fn optimized_bss_start_stays_inside_module_memory() {
+    for (offset, length, byte, accepted) in [
+        (16, 16, 0, true),
+        (16, 17, 0, false),
+        (-1, 1, 0, false),
+        (0, 1, 1, false),
+    ] {
+        let bytes = binary(&format!(
+            r#"(module
+          (@dylink.0 (mem-info (memory 32 4)))
+          (import "env" "memory" (memory 1))
+          (import "env" "__memory_base" (global $base i32))
+          (global $address (mut i32) (i32.const 0))
+          (func $init (local $address i32)
+            global.get $base i32.const {offset} i32.add local.tee $address global.set $address
+            local.get $address i32.const {byte} i32.const {length} memory.fill)
+          (start $init))"#
+        ));
+        assert_eq!(Metadata::parse(&bytes).is_ok(), accepted);
+    }
+}
+
+#[test]
+fn optimized_zero_stores_are_bounded_like_bulk_fill() {
+    for (instruction, value, offset, accepted) in [
+        ("i32.store", "i32.const 0", 28, true),
+        ("i64.store", "i64.const 0", 24, true),
+        ("v128.store", "v128.const i32x4 0 0 0 0", 16, true),
+        ("i32.store", "i32.const 0", 29, false),
+        ("i64.store", "i64.const 0", 25, false),
+        ("v128.store", "v128.const i32x4 0 0 0 0", 17, false),
+        ("i32.store", "i32.const 1", 0, false),
+    ] {
+        let bytes = binary(&format!(
+            r#"(module
+          (@dylink.0 (mem-info (memory 32 4)))
+          (import "env" "memory" (memory 1))
+          (import "env" "__memory_base" (global $base i32))
+          (func $init global.get $base {value} {instruction} offset={offset})
+          (start $init))"#
+        ));
+        assert_eq!(Metadata::parse(&bytes).is_ok(), accepted);
+    }
+}

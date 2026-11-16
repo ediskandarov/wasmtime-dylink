@@ -47,7 +47,7 @@ fn run_fixture(asyncify: bool) -> Result<()> {
     let compiler = env::var_os("EMCC").unwrap_or("emcc".into());
     run(Command::new(&compiler)
         .arg(root.join("tests/fixtures/emscripten_plugin.c"))
-        .args(["-O1", "-sSIDE_MODULE=1", "-o"])
+        .args(["-O3", "-sSIDE_MODULE=1", "-o"])
         .arg(output.join("plugin.so")));
     run(Command::new(&compiler).arg(root.join("tests/fixtures/emscripten_main.c"))
         .args(["-O1", if asyncify { "-sASYNCIFY=1" } else { "-sASYNCIFY=0" }, "-sMAIN_MODULE=2", "-sALLOW_TABLE_GROWTH=1", "-sALLOW_MEMORY_GROWTH=1",

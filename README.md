@@ -97,9 +97,11 @@ stubs; constructors in a cycle must not assume each other has already run.
   rollback of guest writes.
 - Supported: ordinary wasm32 memory, `funcref` tables, PIC data/function imports,
   weak imports, dependency cycles, data relocations and constructors.
-- LLVM's start function is accepted only when also exported as
-  `__wasm_init_memory`. It executes during instantiation and must only initialize
-  that module's memory. User constructors belong in `__wasm_call_ctors`.
+- LLVM's `__wasm_init_memory` start function and Binaryen's base-relative global/BSS
+  initialization are supported. Other starts are rejected. Binaryen starts may
+  only assign module-local globals and zero-fill within the module's memory;
+  they cannot call functions or read unresolved GOT entries. User constructors
+  belong in `__wasm_call_ctors`, after relocation.
 - Not supported: memory64, thread-shared memory/TLS, async instantiation,
   ELF/POSIX symbol-version semantics, nested loads from constructors,
   and re-exporting a function whose binding is still unresolved. Unsupported
