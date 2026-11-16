@@ -175,3 +175,12 @@ It compiles the [original fixtures](tests/fixtures) as PIC shared libraries,
 then checks dependencies, BSS, data relocations, constructors, direct/indirect
 calls, callback identity and repeated loads. The normal test suite uses original
 WAT fixtures and does not require a C toolchain.
+
+For a known module inventory, `ArenaRequirements::add_module(&Metadata::parse(bytes)?)`
+accumulates a conservative memory/table reservation without compiling the modules.
+It includes alignment padding, exported function pointers used by `dlsym`, and
+`GOT.func` bindings. Include each dependency once; load order and reopening do not
+require more space. Reserve `memory_bytes` through the guest allocator (at least
+one byte for a non-null allocation), then use `requirements.at(memory_base,
+table_base)?` to construct the arena. Additional host functions passed directly
+to `Loader::function_pointer` need their own extra table capacity.

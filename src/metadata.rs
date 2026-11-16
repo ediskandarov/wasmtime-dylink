@@ -18,6 +18,7 @@ pub struct Layout {
 #[derive(Clone, Debug, Default)]
 pub struct Metadata {
     pub layout: Layout,
+    pub(crate) pointer_slots: u32,
     pub needed: Vec<String>,
     pub runtime_paths: Vec<String>,
     pub(crate) function_reexports: HashMap<String, (String, String)>,
@@ -54,6 +55,12 @@ impl Metadata {
                 Payload::ImportSection(imports) => {
                     for import in imports.into_imports() {
                         let import = import?;
+                        if import.module == "GOT.func" {
+                            metadata.pointer_slots = metadata
+                                .pointer_slots
+                                .checked_add(1)
+                                .context("function-pointer count overflow")?;
+                        }
                         match import.ty {
                             wasmtime::wasmparser::TypeRef::Memory(ty) => {
                                 ensure!(
@@ -109,6 +116,12 @@ impl Metadata {
                 Payload::ExportSection(exports) => {
                     for export in exports {
                         let export = export?;
+                        if export.kind == wasmtime::wasmparser::ExternalKind::Func {
+                            metadata.pointer_slots = metadata
+                                .pointer_slots
+                                .checked_add(1)
+                                .context("function-pointer count overflow")?;
+                        }
                         if export.kind == wasmtime::wasmparser::ExternalKind::Func
                             && let Some(import) = function_imports.get(export.index as usize)
                         {
