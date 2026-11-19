@@ -59,9 +59,7 @@ impl<T: 'static> Emscripten<T> {
         resolver: impl FnMut(&mut StoreContextMut<'_, T>, &str) -> Result<Vec<u8>> + Send + 'static,
     ) -> Result<Self> {
         let mut store = store.as_context_mut();
-        let memory = main
-            .get_memory(&mut store, "memory")
-            .context("main must export memory")?;
+        let memory = crate::LinearMemory::exported(&mut store, main)?;
         let table = main
             .get_table(&mut store, "__indirect_function_table")
             .context("main must export __indirect_function_table")?;
@@ -114,11 +112,9 @@ impl<T: 'static> Emscripten<T> {
     fn open(&mut self, store: &mut StoreContextMut<'_, T>, handle: u32) -> Result<i32> {
         ensure!(handle != 0, "null dso descriptor");
         let memory = self.loader.memory();
-        let bytes = memory.data(&*store);
         let base = handle as usize;
-        let header = bytes
-            .get(base..base.checked_add(NAME).context("dso overflow")?)
-            .context("dso descriptor out of bounds")?;
+        let mut descriptor = memory.copy(&*store, base, NAME)?;
+        let header = &descriptor;
         let flags = read_u32(header, FLAGS)?;
         ensure!(
             flags & (RTLD_LAZY | RTLD_NOW) != 0,
@@ -128,7 +124,7 @@ impl<T: 'static> Emscripten<T> {
             flags & !(RTLD_LAZY | RTLD_NOW | RTLD_NOLOAD | RTLD_GLOBAL | RTLD_NODELETE) == 0,
             "unsupported dlopen flags: {flags:#x}"
         );
-        let name = c_string(bytes, base + NAME)?.to_owned();
+        let name = memory.string(&*store, base + NAME, MAX_STRING)?;
         ensure!(!name.is_empty(), "empty library name");
         if let Some(previous) = self.handles.get(&handle) {
             ensure!(previous == &name, "dso descriptor changed its library name");
@@ -142,12 +138,7 @@ impl<T: 'static> Emscripten<T> {
         let data = read_u32(header, FILE_DATA)? as usize;
         let size = read_u32(header, FILE_SIZE)? as usize;
         let inline = if data != 0 && self.loader.metadata(&name).is_none() {
-            Some(
-                bytes
-                    .get(data..data.checked_add(size).context("file data overflow")?)
-                    .context("dso file data out of bounds")?
-                    .to_vec(),
-            )
+            Some(memory.copy(&*store, data, size)?)
         } else {
             None
         };
@@ -162,12 +153,17 @@ impl<T: 'static> Emscripten<T> {
         };
         let layout = &self.loader.metadata(&name).unwrap().layout;
         let sizes = (layout.memory_size, layout.table_size);
-        let header = &mut memory.data_mut(store)[base..base + NAME];
+        let header = &mut descriptor;
         write_u32(header, MEMORY_ADDRESS, library.memory_base)?;
         write_u32(header, MEMORY_SIZE, sizes.0)?;
         write_u32(header, TABLE_ADDRESS, library.table_base)?;
         write_u32(header, TABLE_SIZE, sizes.1)?;
-        header[ALLOCATED] = 1;
+        memory.write(
+            &mut *store,
+            base + MEMORY_ADDRESS,
+            &header[MEMORY_ADDRESS..FILE_DATA],
+        )?;
+        memory.write(&mut *store, base + ALLOCATED, &[1])?;
         self.handles.insert(handle, name);
         Ok(1)
     }
@@ -213,9 +209,9 @@ impl<T: 'static> Emscripten<T> {
     ) -> Result<i32> {
         ensure!(handle != u32::MAX, "RTLD_NEXT is unsupported");
         let memory = self.loader.memory();
-        let name = c_string(memory.data(&*store), name as usize)?.to_owned();
+        let name = memory.string(&*store, name as usize, MAX_STRING)?;
         ensure!(index != 0, "null symbol-index pointer");
-        write_u32(memory.data_mut(&mut *store), index as usize, u32::MAX)?;
+        memory.write(&mut *store, index as usize, &u32::MAX.to_le_bytes())?;
         let symbol = if handle == 0 {
             self.loader.symbol(&name)
         } else {
@@ -317,16 +313,6 @@ fn with_adapter<T: 'static>(
     result
 }
 
-fn c_string(bytes: &[u8], start: usize) -> Result<&str> {
-    ensure!(start != 0, "null string pointer");
-    let bytes = bytes.get(start..).context("string pointer out of bounds")?;
-    let end = bytes
-        .iter()
-        .take(MAX_STRING)
-        .position(|byte| *byte == 0)
-        .context("unterminated or oversized string")?;
-    Ok(std::str::from_utf8(&bytes[..end])?)
-}
 fn read_u32(bytes: &[u8], start: usize) -> Result<u32> {
     Ok(u32::from_le_bytes(
         bytes

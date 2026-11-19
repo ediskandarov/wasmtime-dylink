@@ -95,14 +95,21 @@ stubs; constructors in a cycle must not assume each other has already run.
   A failure after loading begins poisons the loader. Initializers may have changed
   shared state; discard that Store. The loader does not promise transactional
   rollback of guest writes.
-- Supported: ordinary wasm32 memory, `funcref` tables, PIC data/function imports,
+- Supported: private and shared wasm32 memory, `funcref` tables, PIC data/function imports,
   weak imports, dependency cycles, data relocations and constructors.
-- LLVM's `__wasm_init_memory` start function and Binaryen's base-relative global/BSS
+- For private memory, LLVM's `__wasm_init_memory` start function and Binaryen's base-relative global/BSS
   initialization are supported. Other starts are rejected. Binaryen starts may
   only assign module-local globals and zero-fill within the module's memory;
   they cannot call functions or read unresolved GOT entries. User constructors
   belong in `__wasm_call_ctors`, after relocation.
-- Not supported: memory64, thread-shared memory/TLS, async instantiation,
+- For shared memory, enable `Config::wasm_threads(true).shared_memory(true)`
+  and pass a `SharedMemory` to `Loader::new`. The Emscripten adapter detects
+  the main module's exported memory. Shared side modules can use wasm-ld's
+  guarded passive-data initializer, including the inlined Binaryen form.
+  The loader checks the guard, destinations and passive segments before linking.
+  Loading is serialized. The embedding must keep other guest threads out of
+  the reserved arena during loading.
+- Not supported: memory64, pthread creation, per-thread TLS, async instantiation,
   ELF/POSIX symbol-version semantics, nested loads from constructors,
   and re-exporting a function whose binding is still unresolved. Unsupported
   metadata/imports fail explicitly. Modules must import their memory/table.

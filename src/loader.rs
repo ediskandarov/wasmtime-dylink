@@ -6,12 +6,12 @@ use std::{
 
 use wasmtime::wasmparser::SymbolFlags;
 use wasmtime::{
-    AsContextMut, Engine, Extern, ExternType, Func, Global, GlobalType, Instance, Linker, Memory,
-    Module, Mutability, Ref, StoreContextMut, Table, Val, ValType,
+    AsContextMut, Engine, Extern, ExternType, Func, Global, GlobalType, Instance, Linker, Module,
+    Mutability, Ref, StoreContextMut, Table, Val, ValType,
 };
 use wasmtime::{Result, bail, ensure, error::Context, format_err as anyhow};
 
-use crate::Metadata;
+use crate::{LinearMemory, Metadata};
 
 /// Regions reserved exclusively for the loader. They must not overlap the guest
 /// heap, stack, static data, or function-table allocations made by other code.
@@ -88,7 +88,7 @@ struct PendingAddress {
 /// retains instances until their store is dropped.
 pub struct Loader {
     engine: Engine,
-    memory: Memory,
+    memory: LinearMemory,
     table: Table,
     arena: Arena,
     next_memory: u32,
@@ -100,21 +100,19 @@ pub struct Loader {
 }
 
 impl Loader {
-    /// Construct a loader over existing ordinary (non-thread-shared) wasm32
+    /// Construct a loader over existing private or shared wasm32
     /// memory and a wasm32 `funcref` table. The arena is not allocated until load.
     pub fn new(
         mut store: impl AsContextMut,
-        memory: Memory,
+        memory: impl Into<LinearMemory>,
         table: Table,
         arena: Arena,
     ) -> Result<Self> {
         let store = store.as_context_mut();
+        let memory = memory.into();
         let memory_type = memory.ty(&store);
         let table_type = table.ty(&store);
-        ensure!(
-            !memory_type.is_64() && !memory_type.is_shared(),
-            "only non-shared wasm32 memory is supported"
-        );
+        ensure!(!memory_type.is_64(), "only wasm32 memory is supported");
         ensure!(
             !table_type.is_64()
                 && wasmtime::RefType::eq(table_type.element(), &wasmtime::RefType::FUNCREF),
@@ -152,6 +150,12 @@ impl Loader {
             "empty or duplicate library name: {name}"
         );
         let metadata = Metadata::parse(bytes).with_context(|| format!("metadata for {name}"))?;
+        if let Some(shared) = metadata.shared_memory {
+            ensure!(
+                shared == matches!(self.memory, LinearMemory::Shared(_)),
+                "env.memory sharedness mismatch for {name}"
+            );
+        }
         let module = Module::from_binary(&self.engine, bytes)
             .with_context(|| format!("compiling {name}"))?;
         self.definitions
@@ -267,8 +271,8 @@ impl Loader {
     }
 
     #[cfg(feature = "emscripten")]
-    pub(crate) fn memory(&self) -> Memory {
-        self.memory
+    pub(crate) fn memory(&self) -> LinearMemory {
+        self.memory.clone()
     }
 
     fn dependency_names(&self, name: &str) -> Vec<String> {
@@ -393,7 +397,7 @@ impl Loader {
                 let namespace = import.module();
                 let field = import.name();
                 let value = match (namespace, field) {
-                    ("env", "memory") => Extern::Memory(self.memory),
+                    ("env", "memory") => self.memory.import(),
                     ("env", "__indirect_function_table") => Extern::Table(self.table),
                     ("env", "__memory_base") => base_global(store, memory_base)?.into(),
                     ("env", "__table_base") => base_global(store, table_base)?.into(),
@@ -622,7 +626,14 @@ impl Loader {
         if pages > current {
             self.memory.grow(&mut *store, pages - current)?;
         }
-        self.memory.data_mut(&mut *store)[memory_base as usize..end as usize].fill(0);
+        let zeros = [0; 4096];
+        for at in (memory_base as usize..end as usize).step_by(zeros.len()) {
+            self.memory.write(
+                &mut *store,
+                at,
+                &zeros[..zeros.len().min(end as usize - at)],
+            )?;
+        }
         let table_end = u64::from(table_base) + u64::from(table_size);
         let current = self.table.size(&*store);
         if table_end > current {

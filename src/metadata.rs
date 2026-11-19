@@ -18,6 +18,7 @@ pub struct Layout {
 #[derive(Clone, Debug, Default)]
 pub struct Metadata {
     pub layout: Layout,
+    pub(crate) shared_memory: Option<bool>,
     pub(crate) pointer_slots: u32,
     pub needed: Vec<String>,
     pub runtime_paths: Vec<String>,
@@ -39,8 +40,8 @@ impl Metadata {
         let mut imported_globals = 0u32;
         let mut bases = Vec::new();
         let mut local_globals = Vec::new();
-        let mut code_index = 0u32;
-        let mut start_body = None;
+        let mut bodies = Vec::new();
+        let mut passive_sizes = Vec::new();
         for payload in Parser::new(0).parse_all(bytes) {
             match payload.context("invalid WebAssembly binary")? {
                 Payload::Version { encoding, .. } => {
@@ -63,9 +64,10 @@ impl Metadata {
                         }
                         match import.ty {
                             wasmtime::wasmparser::TypeRef::Memory(ty) => {
+                                ensure!(!ty.memory64, "only wasm32 memory is supported");
                                 ensure!(
-                                    !ty.memory64 && !ty.shared,
-                                    "only non-shared wasm32 memory is supported"
+                                    metadata.shared_memory.replace(ty.shared).is_none(),
+                                    "multiple memory imports"
                                 );
                                 ensure!(
                                     import.module == "env" && import.name == "memory",
@@ -107,11 +109,17 @@ impl Metadata {
                         );
                     }
                 }
-                Payload::CodeSectionEntry(body) => {
-                    if start == Some(function_imports.len() as u32 + code_index) {
-                        start_body = Some(body);
+                Payload::CodeSectionEntry(body) if start.is_some() => bodies.push(body),
+                Payload::DataSection(data)
+                    if start.is_some() && metadata.shared_memory == Some(true) =>
+                {
+                    for segment in data {
+                        let segment = segment?;
+                        passive_sizes.push(
+                            matches!(segment.kind, wasmtime::wasmparser::DataKind::Passive)
+                                .then_some(segment.data.len()),
+                        );
                     }
-                    code_index += 1;
                 }
                 Payload::ExportSection(exports) => {
                     for export in exports {
@@ -214,18 +222,34 @@ impl Metadata {
             }
         }
         ensure!(found, "missing dylink.0 section");
-        ensure!(
-            start.is_none()
-                || start == memory_initializer
-                || start_body.is_some_and(|body| module_initializer(
-                    body,
-                    &bases,
-                    imported_globals,
-                    &local_globals,
-                    metadata.layout.memory_size
-                )),
-            "start must initialize memory or module-local base globals; constructors run after relocation"
-        );
+        if let Some(start) = start {
+            let local =
+                |index: u32| bodies.get(index.checked_sub(function_imports.len() as u32)? as usize);
+            let shared = metadata.shared_memory == Some(true);
+            let valid = (!shared && Some(start) == memory_initializer)
+                || local(start).is_some_and(|body| {
+                    module_initializer(
+                        body.clone(),
+                        &bases,
+                        imported_globals,
+                        &local_globals,
+                        metadata.layout.memory_size,
+                    ) || (shared
+                        && crate::shared_init::recognize(
+                            body,
+                            local,
+                            &bases,
+                            imported_globals,
+                            &local_globals,
+                            &metadata.layout,
+                            &passive_sizes,
+                        ))
+                });
+            ensure!(
+                valid,
+                "start must initialize memory or module-local base globals; constructors run after relocation"
+            );
+        }
         Ok(metadata)
     }
 

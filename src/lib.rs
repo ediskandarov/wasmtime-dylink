@@ -1,6 +1,8 @@
 #![doc = include_str!("../README.md")]
 #![forbid(unsafe_code)]
 
+mod linear_memory;
+pub use linear_memory::LinearMemory;
 mod arena;
 mod loader;
 pub use arena::ArenaRequirements;
@@ -12,3 +14,5 @@ pub use wasmtime;
 
 #[cfg(feature = "emscripten")]
 pub mod emscripten;
+
+mod shared_init;

@@ -1,6 +1,6 @@
 [package]
 name = "wasmtime-dylink"
-version = "0.2.2"
+version = "0.2.3"
 edition = "2024"
 rust-version = "1.94"
 description = "A dylink.0 shared-library loader built on the public Wasmtime API"
@@ -15,7 +15,8 @@ default = []
 emscripten = []
 
 [dependencies]
-wasmtime = { version = "47", default-features = false, features = ["std", "runtime", "cranelift", "reexport-wasmparser"] }
+wasmtime = { version = "47", default-features = false, features = ["std", "runtime", "cranelift", "reexport-wasmparser", "threads"] }
+wiggle = { version = "47", default-features = false }
 
 [dev-dependencies]
 wat = "1"
