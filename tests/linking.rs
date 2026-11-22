@@ -540,3 +540,55 @@ fn optimized_zero_stores_are_bounded_like_bulk_fill() {
         assert_eq!(Metadata::parse(&bytes).is_ok(), accepted);
     }
 }
+
+#[test]
+fn subtracting_negative_offsets_initializes_globals_and_bss() {
+    for expression in ["i32.const 8192 i32.add", "i32.const -8192 i32.sub"] {
+        let (mut store, host, mut loader, memory, _) = setup();
+        let bytes = binary(&format!(
+            r#"(module
+          (@dylink.0 (mem-info (memory 16384 4)))
+          (import "env" "memory" (memory 1))
+          (import "env" "__memory_base" (global $base i32))
+          (data (i32.add (global.get $base) (i32.const 8191)) "\a5\a5\a5\a5\a5\a5")
+          (global $address (mut i32) (i32.const 0))
+          (func $init (local $address i32)
+            global.get $base {expression} local.tee $address global.set $address
+            local.get $address i32.const 0 i32.const 4 memory.fill)
+          (start $init)
+          (func (export "read") (result i32) global.get $address))"#
+        ));
+        loader.register("subtracted", &bytes).unwrap();
+        let library = loader.load(&mut store, &host, "subtracted").unwrap();
+        let address = library.memory_base as usize + 8192;
+        assert_eq!(call(&mut store, &library, "read"), address as i32);
+        assert_eq!(
+            &memory.data(&store)[address - 1..address + 5],
+            &[0xa5, 0, 0, 0, 0, 0xa5]
+        );
+    }
+}
+
+#[test]
+fn subtraction_cannot_escape_the_module_initialization_region() {
+    for expression in [
+        "global.get $base i32.const 1 i32.sub",
+        "global.get $base i32.const -32 i32.sub",
+        "global.get $base i32.const -2147483648 i32.sub",
+        "global.get $base i32.const -1 i32.add i32.const -1 i32.sub",
+        "i32.const 16 global.get $base i32.sub",
+        "global.get $base global.get $base i32.sub",
+        "global.get $external i32.const -4 i32.sub",
+    ] {
+        let bytes = binary(&format!(
+            r#"(module
+          (@dylink.0 (mem-info (memory 32 4)))
+          (import "env" "memory" (memory 1))
+          (import "env" "__memory_base" (global $base i32))
+          (import "GOT.mem" "external" (global $external (mut i32)))
+          (func $init {expression} i32.const 0 i32.const 4 memory.fill)
+          (start $init))"#
+        ));
+        assert!(Metadata::parse(&bytes).is_err(), "accepted {expression}");
+    }
+}

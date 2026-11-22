@@ -366,6 +366,24 @@ fn module_initializer(
                 }
                 initialized = true;
             }
+            // Binaryen can encode base + 8192 as base - (-8192).
+            // Keep the symbolic base and reject offsets that wrap or go negative.
+            Operator::I32Sub => {
+                let (Some(right), Some(left)) = (stack.pop(), stack.pop()) else {
+                    return false;
+                };
+                if right.base.is_some() {
+                    return false;
+                }
+                let difference = i64::from(left.offset) - i64::from(right.offset as i32);
+                let Ok(offset) = u32::try_from(difference) else {
+                    return false;
+                };
+                stack.push(Value {
+                    base: left.base,
+                    offset,
+                });
+            }
             Operator::I32Add => {
                 let (Some(right), Some(left)) = (stack.pop(), stack.pop()) else {
                     return false;

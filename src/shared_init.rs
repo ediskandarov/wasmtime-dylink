@@ -84,6 +84,13 @@ fn address<'s, 'a>(ops: &'s [Operator<'a>]) -> Option<(u32, u32, &'s [Operator<'
             I32Add,
             rest @ ..,
         ] => Some((*global_index, u32::try_from(*value).ok()?, rest)),
+        // Binaryen may use subtraction of a negative offset to shorten its LEB encoding.
+        [
+            GlobalGet { global_index },
+            I32Const { value },
+            I32Sub,
+            rest @ ..,
+        ] => Some((*global_index, u32::try_from(-i64::from(*value)).ok()?, rest)),
         [GlobalGet { global_index }, rest @ ..] => Some((*global_index, 0, rest)),
         _ => None,
     }
